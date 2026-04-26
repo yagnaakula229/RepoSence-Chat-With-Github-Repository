@@ -1,0 +1,17 @@
+# Local environment files
+backend/.env
+
+# Python bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Node modules
+frontend/node_modules/
+
+# Vite cache
+node_modules/
+/dist
+
+# Logs
+*.log
