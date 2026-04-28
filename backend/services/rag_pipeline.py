@@ -29,18 +29,33 @@ class RAGPipeline:
         return cls._singleton
 
     def _build_llm(self):
-        # Try to use OpenAI if API key is available
+        # Prefer OpenAI when an API key is available.
         if os.getenv("OPENAI_API_KEY"):
             model_name = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
             return ChatOpenAI(model_name=model_name, temperature=0.1)
 
-        # Fall back to local Hugging Face model if a token is available
+        # Use HuggingFaceHub inference if the HF API token is configured.
+        hf_token = os.getenv("HUGGINGFACE_API_KEY") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        if hf_token:
+            os.environ.setdefault("HUGGINGFACEHUB_API_TOKEN", hf_token)
+            try:
+                from langchain.llms import HuggingFaceHub
+
+                model_name = os.getenv("HF_LLM_MODEL", "google/flan-t5-small")
+                return HuggingFaceHub(
+                    repo_id=model_name,
+                    model_kwargs={"temperature": 0.1, "max_new_tokens": 128},
+                )
+            except Exception as exc:
+                import logging
+
+                logging.warning(
+                    f"Failed to initialize HuggingFaceHub LLM: {exc}. Falling back to local model."
+                )
+
+        # Fall back to a local Hugging Face transformer if available.
         try:
             from transformers import pipeline
-
-            hf_token = os.getenv("HUGGINGFACE_API_KEY") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-            if hf_token:
-                os.environ.setdefault("HUGGINGFACEHUB_API_TOKEN", hf_token)
 
             model_name = os.getenv("HF_LLM_MODEL", "distilgpt2")
             task_name = os.getenv("HF_LLM_TASK", "text-generation")
@@ -78,10 +93,16 @@ class RAGPipeline:
                 **kwargs: Any,
             ) -> str:
                 params = {**kwargs}
-                if "temperature" not in params:
-                    params["temperature"] = 0.1
-                if "max_new_tokens" not in params:
-                    params["max_new_tokens"] = 512
+                params["temperature"] = float(params.get("temperature", 0.1))
+                params["max_new_tokens"] = min(int(params.get("max_new_tokens", 128)), 128)
+                if "top_p" not in params:
+                    params["top_p"] = 0.95
+                if "repetition_penalty" not in params:
+                    params["repetition_penalty"] = 1.2
+                if "do_sample" not in params:
+                    params["do_sample"] = params["temperature"] > 0
+                if "pad_token_id" not in params:
+                    params["pad_token_id"] = getattr(pipe.tokenizer, "eos_token_id", 0)
 
                 max_input_length = getattr(pipe.tokenizer, "model_max_length", 1024) or 1024
                 tokenized = pipe.tokenizer(
@@ -106,6 +127,13 @@ class RAGPipeline:
                     text = output.get("generated_text") or output.get("text") or str(output)
                 else:
                     text = str(output)
+
+                # Strip the echoed prompt from the model output when using the local transformer pipeline.
+                for prefix in (prompt, truncated_prompt):
+                    if text.startswith(prefix):
+                        text = text[len(prefix) :]
+                        break
+                text = text.lstrip("\n ")
 
                 if stop is not None:
                     from langchain.llms.utils import enforce_stop_tokens
@@ -180,6 +208,35 @@ class RAGPipeline:
 
         return EnhancedMockLLM()
 
+    def _summarize_documents_fallback(self, query: str, documents: list[Document]) -> str:
+        if not documents:
+            return "I couldn't retrieve relevant repository content. Please try a different question."
+
+        query_terms = set(re.findall(r"\b\w+\b", query.lower()))
+        summary_lines: list[str] = []
+
+        for document in documents:
+            for line in document.page_content.splitlines():
+                line_text = line.strip()
+                if not line_text:
+                    continue
+                normalized = line_text.lower()
+                if any(term in normalized for term in query_terms if len(term) > 3):
+                    summary_lines.append(line_text)
+                    break
+
+        if not summary_lines:
+            for document in documents[:3]:
+                summary_lines.extend(
+                    [line.strip() for line in document.page_content.splitlines() if line.strip()][:2]
+                )
+
+        if not summary_lines:
+            return "I found relevant files, but could not extract a concise answer. Please ask a simpler question."
+
+        summary = " ".join(summary_lines)
+        return summary[:1000] + ("..." if len(summary) > 1000 else "")
+
     def _split_code(self, document: Document) -> list[Document]:
         text = document.page_content
         split_pattern = r"(?=^(?:def |class |function |const |let |var |export |async |public |private |protected ))"
@@ -234,7 +291,15 @@ class RAGPipeline:
             return_source_documents=True,
         )
 
-        result = chain({"query": query})
+        try:
+            result = chain({"query": query})
+        except Exception:
+            source_documents = retriever.get_relevant_documents(query)
+            sources = sorted({doc.metadata.get("source") for doc in source_documents if doc.metadata.get("source")})
+            answer = self._summarize_documents_fallback(query, source_documents)
+            self.chat_history.setdefault(repo_url, []).append({"question": query, "answer": answer})
+            return {"answer": answer, "sources": sources, "history": self.chat_history[repo_url]}
+
         source_documents = result.get("source_documents", [])
         if source_documents is None:
             source_documents = []
@@ -245,6 +310,10 @@ class RAGPipeline:
             if source_name and source_name not in sources:
                 sources.append(source_name)
 
-        answer = result.get("result", str(result)) if isinstance(result, dict) else str(result)
-        self.chat_history[repo_url].append({"question": query, "answer": answer})
+        if isinstance(result, dict):
+            answer = result.get("answer") or result.get("result") or str(result)
+        else:
+            answer = str(result)
+
+        self.chat_history.setdefault(repo_url, []).append({"question": query, "answer": answer})
         return {"answer": answer, "sources": sources, "history": self.chat_history[repo_url]}

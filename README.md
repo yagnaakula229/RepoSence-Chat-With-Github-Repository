@@ -30,9 +30,10 @@ The backend is built with FastAPI and exposes two endpoints:
 
 ### Environment variables
 
-- `OPENAI_API_KEY` — required for LLM and embeddings
+- `OPENAI_API_KEY` — optional; if set, the app uses OpenAI for embeddings and LLM generation.
+- `HUGGINGFACEHUB_API_TOKEN` — optional; used for Hugging Face model inference when no OpenAI key is configured.
 - `EMBEDDING_MODEL` — optional, default `text-embedding-3-small`
-- `LLM_MODEL` — optional, default `gpt-3.5-turbo`
+- `LLM_MODEL` — optional, default `gpt-3.5-turbo` for OpenAI or `google/flan-t5-small` / `distilgpt2` for Hugging Face.
 - `GITHUB_TOKEN` — optional, improves GitHub API rate limits
 
 ## Project structure
