@@ -123,6 +123,11 @@ button:disabled {
   line-height: 1.6;
 }
 
+.history-answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .history-question {
   font-weight: 600;
   margin-bottom: 8px;
